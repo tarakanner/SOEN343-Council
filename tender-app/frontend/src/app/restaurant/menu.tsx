@@ -9,7 +9,7 @@ import { loadRestaurantMenu, saveRestaurantMenu, type MenuItem, type RestaurantM
 import { CoverImagePicker } from '@/components/restaurant/CoverImagePicker';
 import { readSessionToken } from '@/context/sessionStorage';
 import { readRestaurantCover, writeRestaurantCover } from '@/storage/restaurantCover';
-import { clearRestaurantItemPhoto, readRestaurantItemPhoto, writeRestaurantItemPhoto } from '@/storage/restaurantItemPhoto';
+import { readRestaurantItemPhoto, writeRestaurantItemPhoto } from '@/storage/restaurantItemPhoto';
 
 const newItem = (): MenuItem => ({ id: null, name: '', description: '', category: '', price: 0, status: 'available', photoUrl: null, options: [] });
 const emptyRestaurantMenu = (restaurantId: number, name: string): RestaurantMenu => ({ restaurantId, name, status: 'closed', address: '', deliveryFee: 0, coverUrl: null, menuName: 'Menu', items: [] });
@@ -17,6 +17,7 @@ const money = (value: number) => Number.isFinite(value) ? value.toFixed(2) : '0.
 
 export default function EditMenu() {
   const router = useRouter();
+  const goBack = () => router.replace('/restaurant');
   const { user, ready } = useAuth();
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
@@ -89,15 +90,6 @@ export default function EditMenu() {
     }
     updateItem(index, { photoUrl: dataUri });
   };
-  const changeItemPhotoUrl = (index: number, photoUrl: string) => {
-    if (!token || !user || !menu) return;
-    const itemId = menu.items[index]?.id;
-    if (itemId != null) {
-      try { clearRestaurantItemPhoto(user.id, itemId); }
-      catch { setMessage('Photo URL changed for this session, but browser storage is unavailable.'); }
-    }
-    updateItem(index, { photoUrl });
-  };
   const removeItemPhoto = (index: number) => {
     if (!token || !user || !menu) return;
     const itemId = menu.items[index]?.id;
@@ -148,12 +140,12 @@ export default function EditMenu() {
     <Text style={local.emptyTitle}>We couldn&apos;t fetch a menu for your restaurant.</Text>
     <Text style={local.emptyDetail}>{message}</Text>
     <Pressable accessibilityRole="button" style={local.addButton} onPress={createMenu}><Text style={local.addText}>Press here to create one</Text></Pressable>
-    <Pressable accessibilityRole="button" onPress={() => router.back()}><Text style={local.link}>Back</Text></Pressable>
+    <Pressable accessibilityRole="button" onPress={goBack}><Text style={local.link}>Back</Text></Pressable>
   </View>;
   const coverHeight = Math.max(290, Math.min(height * 0.39, 390));
   const categories = [...new Set(menu.items.map((item) => item.category.trim() || 'Menu'))];
   return <DetailPage title={menu.name} cover={menu.coverUrl ? { uri: menu.coverUrl } : undefined} coverHeight={coverHeight} foreground={<><View style={[local.topBar, { top: insets.top + 12 }]}>
-    <Pressable style={local.topButton} accessibilityRole="button" onPress={() => router.back()}><Text style={local.topButtonText}>‹</Text></Pressable>
+    <Pressable style={local.topButton} accessibilityRole="button" onPress={goBack}><Text style={local.topButtonText}>‹</Text></Pressable>
     <Pressable style={local.saveButton} accessibilityRole="button" accessibilityState={{ disabled: saving }} disabled={saving} onPress={save}><Text style={local.saveText}>{saving ? 'Saving…' : 'Save menu'}</Text></Pressable>
   </View><View style={{ position: 'absolute', top: coverHeight - 58, right: 18 }}><CoverImagePicker compact onSelect={selectCover} onError={setMessage} /></View></>}>
     <View style={customerStyles.info}>
@@ -188,7 +180,6 @@ export default function EditMenu() {
         <CoverImagePicker label="Menu item photo" onSelect={(dataUri) => selectItemPhoto(expanded, dataUri)} onError={setMessage} />
         <Text style={local.coverNote}>Picked item photos stay on this device.</Text>
         {!!menu.items[expanded].photoUrl && <Pressable accessibilityRole="button" onPress={() => removeItemPhoto(expanded)}><Text style={local.link}>Remove item photo</Text></Pressable>}
-        <Field label="Photo URL" value={menu.items[expanded].photoUrl?.startsWith('data:') ? '' : menu.items[expanded].photoUrl ?? ''} placeholder="https://example.com/pizza.jpg" onChangeText={(photoUrl) => changeItemPhotoUrl(expanded, photoUrl)} />
         <Text style={local.label}>Availability</Text><View style={local.chips}><Chip label="Available" selected={menu.items[expanded].status === 'available'} onPress={() => updateItem(expanded, { status: 'available' })} /><Chip label="Sold out" selected={menu.items[expanded].status === 'sold_out'} onPress={() => updateItem(expanded, { status: 'sold_out' })} /></View>
         <Text style={local.subheading}>Toppings</Text>
         {menu.items[expanded].options.map((option, optionIndex) => <View key={option.id ?? `new-${optionIndex}`} style={local.optionRow}>

@@ -100,7 +100,7 @@ export default function RestaurantOrders() {
 
   return <SafeAreaView style={styles.page}>
     <ScrollView contentContainerStyle={styles.content}>
-      <View style={styles.header}><Pressable accessibilityRole="button" onPress={() => router.back()}><Text style={styles.back}>‹  Restaurant dashboard</Text></Pressable><AccountMenu /></View>
+      <View style={styles.header}><Pressable accessibilityRole="button" onPress={() => router.replace('/restaurant')}><Text style={styles.back}>‹  Restaurant dashboard</Text></Pressable><AccountMenu /></View>
       <Text style={styles.restaurantName}>{user.name}</Text>
       <Text style={styles.title}>Orders queue</Text>
       {!!toast && <View style={styles.toast}><Text style={styles.toastText}>{toast}</Text><Pressable accessibilityRole="button" accessibilityLabel="Dismiss notification" onPress={() => setToast('')}><Text style={styles.toastClose}>×</Text></Pressable></View>}
