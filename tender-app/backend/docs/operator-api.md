@@ -117,7 +117,8 @@ history receives the same status from the order record.
   a defined eligible order state, and transaction/locking rules. Order already
   maps `courier_id`; courier profiles currently have no dedicated backend entity
   on this branch. Define the request/response after inspecting that model.
-- `MockPaymentGateway` remains the configured payment adapter in development.
+- Payment goes through `PaymentStrategy` implementations (`TenderCashPayment`,
+  `MockCardPayment`, `PayPalPayment`); the mock card is disabled by default.
   Order charges and refunds are recorded in the ledger; delivered-order refunds
   are credited in Tender Cash and do not initiate PayPal transactions.
 - Restoration needs an explicit initial-state definition, table/dependency scope,

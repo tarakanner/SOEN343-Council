@@ -9,7 +9,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,9 +31,11 @@ import com.council.tenderapp.reg.services.CustomerProfileService;
 import com.council.tenderapp.prc.service.PricingService;
 import com.council.tenderapp.prc.service.LedgerService;
 import com.council.tenderapp.technicalservices.payment.PaymentDeclinedException;
-import com.council.tenderapp.technicalservices.payment.PaymentGateway;
+import com.council.tenderapp.technicalservices.payment.MockCardPayment;
 import com.council.tenderapp.technicalservices.payment.PaymentResult;
+import com.council.tenderapp.technicalservices.payment.PaymentStrategy;
 import com.council.tenderapp.technicalservices.payment.TenderCash;
+import com.council.tenderapp.technicalservices.payment.TenderCashPayment;
 
 @Service
 public class CustomerOrderService {
@@ -42,7 +43,6 @@ public class CustomerOrderService {
     private final MenuItemRepository menuItemRepository;
     private final MenuItemOptionRepository menuItemOptionRepository;
     private final OrderRepository orderRepository;
-    private final PaymentGateway paymentGateway;
     private final PreparationQueueService preparationQueueService;
     private final OrderCancellationService cancellations;
     private final JdbcTemplate jdbc;
@@ -50,19 +50,20 @@ public class CustomerOrderService {
     private final PricingService pricingService;
     private final LedgerService ledgerService;
     private final TenderCash tenderCash;
-    private final boolean allowMockPayments;
+    // Strategies for direct checkout; PayPal checkout passes its own PayPalPayment.
+    private final PaymentStrategy tenderCashPayment;
+    private final PaymentStrategy cardPayment;
 
     public CustomerOrderService(BrowseService browseService, MenuItemRepository menuItemRepository,
             MenuItemOptionRepository menuItemOptionRepository, OrderRepository orderRepository,
-            PaymentGateway paymentGateway, PreparationQueueService preparationQueueService, JdbcTemplate jdbc,
+            PreparationQueueService preparationQueueService, JdbcTemplate jdbc,
             CustomerProfileService customerProfileService, OrderCancellationService cancellations,
             PricingService pricingService, LedgerService ledgerService, TenderCash tenderCash,
-            @Value("${app.payments.allow-mock:false}") boolean allowMockPayments) {
+            TenderCashPayment tenderCashPayment, MockCardPayment cardPayment) {
         this.browseService = browseService;
         this.menuItemRepository = menuItemRepository;
         this.menuItemOptionRepository = menuItemOptionRepository;
         this.orderRepository = orderRepository;
-        this.paymentGateway = paymentGateway;
         this.preparationQueueService = preparationQueueService;
         this.cancellations = cancellations;
         this.jdbc = jdbc;
@@ -70,36 +71,34 @@ public class CustomerOrderService {
         this.pricingService = pricingService;
         this.ledgerService = ledgerService;
         this.tenderCash = tenderCash;
-        this.allowMockPayments = allowMockPayments;
+        this.tenderCashPayment = tenderCashPayment;
+        this.cardPayment = cardPayment;
     }
 
+    /** Direct checkout: Tender Cash when it covers the whole order, otherwise the card strategy. */
     @Transactional
     public OrderResponseDto placeOrder(Long customerId, PlaceOrderRequestDto request) {
+        return checkout(customerId, request, amountDue -> amountDue.signum() == 0 ? tenderCashPayment : cardPayment);
+    }
+
+    /** Checkout with a payment strategy chosen by the caller, e.g. a verified PayPal capture. */
+    @Transactional
+    public OrderResponseDto placeOrder(Long customerId, PlaceOrderRequestDto request, PaymentStrategy payment) {
+        return checkout(customerId, request, amountDue -> payment);
+    }
+
+    private OrderResponseDto checkout(Long customerId, PlaceOrderRequestDto request,
+            Function<BigDecimal, PaymentStrategy> strategyFor) {
         PreparedOrder prepared = prepareOrder(customerId, request);
         tenderCash.lockCustomer(customerId);
-        BigDecimal paid = prepared.quote().total().subtract(request.tenderAmount() == 0 ? BigDecimal.ZERO
+        BigDecimal amountDue = prepared.quote().total().subtract(request.tenderAmount() == 0 ? BigDecimal.ZERO
                 : tenderCash.discount(customerId, request.tenderAmount(), prepared.quote().total()));
-        if (paid.signum() > 0 && !allowMockPayments) {
-            throw new InvalidOrderException("Use PayPal checkout for the remaining payment");
-        }
-        PaymentResult payment = paid.signum() == 0 ? PaymentResult.approved("TENDER-CASH") : paymentGateway.charge(customerId, paid);
+        PaymentStrategy strategy = strategyFor.apply(amountDue);
+        PaymentResult payment = strategy.pay(customerId, amountDue);
         if (!payment.approved()) {
             throw new PaymentDeclinedException("Payment declined: " + payment.message());
         }
-        return persistOrder(customerId, request, prepared, payment, paid);
-    }
-
-    @Transactional
-    public OrderResponseDto placePaidOrder(Long customerId, PlaceOrderRequestDto request,
-            String paymentReference, BigDecimal approvedAmount) {
-        PreparedOrder prepared = prepareOrder(customerId, request);
-        tenderCash.lockCustomer(customerId);
-        BigDecimal paid = prepared.quote().total().subtract(request.tenderAmount() == 0 ? BigDecimal.ZERO
-                : tenderCash.discount(customerId, request.tenderAmount(), prepared.quote().total()));
-        if (paid.compareTo(approvedAmount) != 0) {
-            throw new InvalidOrderException("Order price changed after PayPal approval");
-        }
-        return persistOrder(customerId, request, prepared, PaymentResult.approved(paymentReference), paid);
+        return persistOrder(customerId, request, prepared, payment, amountDue);
     }
 
     private OrderResponseDto persistOrder(Long customerId, PlaceOrderRequestDto request,

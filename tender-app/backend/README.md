@@ -247,7 +247,13 @@ tenders, returns any tenders spent, and credits the cash portion as Tender Cash,
 rounded up to the next tender. These are store credits; no PayPal refund is sent.
 The direct order endpoint accepts a fully Tender Cash funded order; a remaining
 cash amount must go through PayPal. Set `app.payments.allow-mock=true` only for
-tests that intentionally exercise the mock payment gateway.
+tests that intentionally exercise the mock card payment.
+
+Payment uses the Strategy pattern. `CustomerOrderService` (the context) prices
+the order, applies Tender Cash, then hands the amount due to a `PaymentStrategy`:
+`TenderCashPayment` (order fully covered), `MockCardPayment` (simulated card,
+off by default), or `PayPalPayment` (a capture already verified by
+`PayPalCheckoutService`).
 
 ## Operator actions
 

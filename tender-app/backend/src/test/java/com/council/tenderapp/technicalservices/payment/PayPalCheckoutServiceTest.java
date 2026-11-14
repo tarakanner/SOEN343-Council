@@ -46,7 +46,7 @@ class PayPalCheckoutServiceTest {
                     new BigDecimal("1.60"), new BigDecimal("10.00"), new BigDecimal("25.10")));
             OrderResponseDto receipt = new OrderResponseDto(8L, 2L, "placed", new BigDecimal("25.10"),
                     Instant.now(), "PAYPAL-CAPTURE-1", List.of());
-            when(orders.placePaidOrder(eq(4L), eq(request), eq("PAYPAL-CAPTURE-1"), eq(new BigDecimal("25.10"))))
+            when(orders.placeOrder(eq(4L), eq(request), eq(new PayPalPayment("CAPTURE-1", new BigDecimal("25.10")))))
                     .thenReturn(receipt);
             PayPalCheckoutService paypal = new PayPalCheckoutService(orders, new ObjectMapper(), mock(TenderCash.class), "client", "secret",
                     "http://127.0.0.1:" + server.getAddress().getPort());
@@ -55,18 +55,18 @@ class PayPalCheckoutServiceTest {
             assertThat(created.orderId()).isEqualTo("ORDER-1");
             assertThat(created.approvalUrl()).contains("ORDER-1");
             assertThat(new ObjectMapper().readTree(createBody.get()).path("purchase_units").path(0)
-                    .path("amount").path("value").asText()).isEqualTo("25.10");
-            assertThat(paypal.capture(4L, "ORDER-1")).containsExactly(receipt);
-            verify(orders).placePaidOrder(4L, request, "PAYPAL-CAPTURE-1", new BigDecimal("25.10"));
-        } finally {
-            server.stop(0);
+                        .path("amount").path("value").asText()).isEqualTo("25.10");
+                assertThat(paypal.capture(4L, "ORDER-1")).containsExactly(receipt);
+                verify(orders).placeOrder(4L, request, new PayPalPayment("CAPTURE-1", new BigDecimal("25.10")));
+            } finally {
+                server.stop(0);
+            }
+        }
+
+        private static void respond(com.sun.net.httpserver.HttpExchange exchange, String body) throws java.io.IOException {
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var output = exchange.getResponseBody()) { output.write(bytes); }
         }
     }
-
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, String body) throws java.io.IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", "application/json");
-        exchange.sendResponseHeaders(200, bytes.length);
-        try (var output = exchange.getResponseBody()) { output.write(bytes); }
-    }
-}

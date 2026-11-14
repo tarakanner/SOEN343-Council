@@ -49,9 +49,12 @@ import com.council.tenderapp.ord.repositories.OrderRepository;
 import com.council.tenderapp.reg.services.CustomerProfileService;
 import com.council.tenderapp.prc.service.PricingService;
 import com.council.tenderapp.technicalservices.payment.PaymentDeclinedException;
-import com.council.tenderapp.technicalservices.payment.PaymentGateway;
+import com.council.tenderapp.technicalservices.logging.AppLogService;
+import com.council.tenderapp.technicalservices.payment.MockCardPayment;
+import com.council.tenderapp.technicalservices.payment.PayPalPayment;
 import com.council.tenderapp.technicalservices.payment.PaymentResult;
 import com.council.tenderapp.technicalservices.payment.TenderCash;
+import com.council.tenderapp.technicalservices.payment.TenderCashPayment;
 
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
@@ -68,7 +71,7 @@ class OrderServiceTest {
     @Mock
     private OrderRepository orderRepository;
     @Mock
-    private PaymentGateway paymentGateway;
+    private MockCardPayment cardPayment;
     @Mock
     private PreparationQueueService preparationQueueService;
     @Mock
@@ -87,9 +90,9 @@ class OrderServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new CustomerOrderService(browseService, menuItemRepository, menuItemOptionRepository, orderRepository, paymentGateway, preparationQueueService, jdbc, customerProfileService,
+        service = new CustomerOrderService(browseService, menuItemRepository, menuItemOptionRepository, orderRepository, preparationQueueService, jdbc, customerProfileService,
                 new OrderCancellationService(orderRepository, preparationQueueService, publisher, tenderCash), pricingService,
-                org.mockito.Mockito.mock(com.council.tenderapp.prc.service.LedgerService.class), tenderCash, true);
+                org.mockito.Mockito.mock(com.council.tenderapp.prc.service.LedgerService.class), tenderCash, new TenderCashPayment(), cardPayment);
         lenient().when(customerProfileService.deliveryAddress(CUSTOMER_ID)).thenReturn(Optional.of(
                 new CustomerProfileService.DeliveryAddress("1250 Rue Peel, Montreal, Canada", 45.508, -73.571)));
         lenient().when(pricingService.quote(any(), any(), any(), any())).thenAnswer(inv -> {
@@ -111,20 +114,80 @@ class OrderServiceTest {
         return new PlaceOrderRequestDto(RESTAURANT_ID, List.of(items));
     }
 
+    private void savesOrder() {
+        when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
+    }
+
     @Test
     void directOrderCannotUseMockPaymentByDefault() {
         menu(item(1L, "Lunch", "12.00", "available"));
-        ReflectionTestUtils.setField(service, "allowMockPayments", false);
+        service = new CustomerOrderService(browseService, menuItemRepository, menuItemOptionRepository, orderRepository,
+                preparationQueueService, jdbc, customerProfileService,
+                new OrderCancellationService(orderRepository, preparationQueueService, publisher, tenderCash), pricingService,
+                org.mockito.Mockito.mock(com.council.tenderapp.prc.service.LedgerService.class), tenderCash,
+                new TenderCashPayment(), new MockCardPayment(org.mockito.Mockito.mock(AppLogService.class), false));
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1))))
                 .isInstanceOf(InvalidOrderException.class)
                 .hasMessageContaining("PayPal checkout");
-        verifyNoInteractions(paymentGateway, orderRepository);
+        verifyNoInteractions(orderRepository);
+    }
+
+    @Test
+    void fullyTenderCoveredOrderUsesTenderCashStrategyWithoutCharging() {
+        menu(item(1L, "Lunch", "12.00", "available"));
+        when(tenderCash.discount(CUSTOMER_ID, 120L, new BigDecimal("12.00"))).thenReturn(new BigDecimal("12.0"));
+        savesOrder();
+
+        OrderResponseDto response = service.placeOrder(CUSTOMER_ID, new PlaceOrderRequestDto(RESTAURANT_ID,
+                List.of(new OrderItemRequestDto(1L, 1)), null, null, null, 120L));
+
+        assertThat(response.paymentReference()).isEqualTo("TENDER-CASH");
+        verifyNoInteractions(cardPayment);
+        verify(tenderCash).placed(any(Order.class), eq(120L), eq(new BigDecimal("0.00")));
+    }
+
+    @Test
+    void partlyTenderCoveredOrderChargesTheRemainderToTheCardStrategy() {
+        menu(item(1L, "Lunch", "12.00", "available"));
+        when(tenderCash.discount(CUSTOMER_ID, 50L, new BigDecimal("12.00"))).thenReturn(new BigDecimal("5.0"));
+        when(cardPayment.pay(CUSTOMER_ID, new BigDecimal("7.00"))).thenReturn(PaymentResult.approved("MOCK-2"));
+        savesOrder();
+
+        OrderResponseDto response = service.placeOrder(CUSTOMER_ID, new PlaceOrderRequestDto(RESTAURANT_ID,
+                List.of(new OrderItemRequestDto(1L, 1)), null, null, null, 50L));
+
+        assertThat(response.paymentReference()).isEqualTo("MOCK-2");
+        verify(tenderCash).placed(any(Order.class), eq(50L), eq(new BigDecimal("7.00")));
+    }
+
+    @Test
+    void callerChosenPayPalStrategyRecordsTheCaptureReference() {
+        menu(item(1L, "Lunch", "12.00", "available"));
+        savesOrder();
+
+        OrderResponseDto response = service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1)),
+                new PayPalPayment("CAPTURE-9", new BigDecimal("12.00")));
+
+        assertThat(response.paymentReference()).isEqualTo("PAYPAL-CAPTURE-9");
+        verifyNoInteractions(cardPayment);
+    }
+
+    @Test
+    void payPalStrategyRejectsAPriceThatChangedAfterCapture() {
+        menu(item(1L, "Lunch", "12.00", "available"));
+
+        assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1)),
+                new PayPalPayment("CAPTURE-9", new BigDecimal("10.00"))))
+                .isInstanceOf(InvalidOrderException.class)
+                .hasMessageContaining("price changed");
+        verify(orderRepository, never()).save(any());
+        verifyNoInteractions(cardPayment, preparationQueueService);
     }
 
     @Test
     void placesOrderComputesTotalAndQueuesIt() {
         menu(item(1L, "Margherita Pizza", "14.00", "available"), item(4L, "Sparkling Water", "3.00", "available"));
-        when(paymentGateway.charge(CUSTOMER_ID, new BigDecimal("34.00"))).thenReturn(PaymentResult.approved("MOCK-1"));
+        when(cardPayment.pay(CUSTOMER_ID, new BigDecimal("34.00"))).thenReturn(PaymentResult.approved("MOCK-1"));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> {
             Order order = inv.getArgument(0);
             ReflectionTestUtils.setField(order, "id", 42L);
@@ -156,7 +219,7 @@ class OrderServiceTest {
         PricingService.Quote quote = new PricingService.Quote(new BigDecimal("12.00"), new BigDecimal("2.00"),
                 new BigDecimal("1.50"), new BigDecimal("1.60"), new BigDecimal("2.00"), new BigDecimal("17.10"));
         when(pricingService.quote(any(), any(), any(), any())).thenReturn(quote);
-        when(paymentGateway.charge(CUSTOMER_ID, new BigDecimal("17.10"))).thenReturn(PaymentResult.approved("MOCK-1"));
+        when(cardPayment.pay(CUSTOMER_ID, new BigDecimal("17.10"))).thenReturn(PaymentResult.approved("MOCK-1"));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> {
             Order order = inv.getArgument(0);
             ReflectionTestUtils.setField(order, "id", 55L);
@@ -167,7 +230,7 @@ class OrderServiceTest {
 
         assertThat(response.total()).isEqualByComparingTo("17.10");
         verify(pricingService).saveBill(any(Order.class), eq(quote));
-        verify(paymentGateway).charge(CUSTOMER_ID, new BigDecimal("17.10"));
+        verify(cardPayment).pay(CUSTOMER_ID, new BigDecimal("17.10"));
     }
 
     @Test
@@ -179,13 +242,13 @@ class OrderServiceTest {
 
         assertThat(service.quoteOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1))).total())
                 .isEqualByComparingTo("17.10");
-        verifyNoInteractions(paymentGateway, orderRepository);
+        verifyNoInteractions(cardPayment, orderRepository);
     }
 
     @Test
     void copiesTheCustomersAddressOntoTheOrder() {
         menu(item(2L, "Pepperoni Pizza", "17.00", "available"));
-        when(paymentGateway.charge(any(), any())).thenReturn(PaymentResult.approved("MOCK-1"));
+        when(cardPayment.pay(any(), any())).thenReturn(PaymentResult.approved("MOCK-1"));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
         when(customerProfileService.deliveryAddress(CUSTOMER_ID)).thenReturn(Optional.of(
                 new CustomerProfileService.DeliveryAddress("1250 Rue Peel, Montreal, Canada", 45.508, -73.571)));
@@ -202,7 +265,7 @@ class OrderServiceTest {
     @Test
     void storesMenuPriceSnapshotOnEachLine() {
         menu(item(2L, "Pepperoni Pizza", "17.00", "available"));
-        when(paymentGateway.charge(any(), any())).thenReturn(PaymentResult.approved("MOCK-1"));
+        when(cardPayment.pay(any(), any())).thenReturn(PaymentResult.approved("MOCK-1"));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
 
         service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(2L, 3)));
@@ -222,7 +285,7 @@ class OrderServiceTest {
 
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1))))
                 .isInstanceOf(RestaurantClosedException.class);
-        verifyNoInteractions(paymentGateway, orderRepository, preparationQueueService);
+        verifyNoInteractions(cardPayment, orderRepository, preparationQueueService);
     }
 
     @Test
@@ -231,7 +294,7 @@ class OrderServiceTest {
 
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(5L, 1))))
                 .isInstanceOf(InvalidOrderException.class);
-        verifyNoInteractions(paymentGateway, orderRepository, preparationQueueService);
+        verifyNoInteractions(cardPayment, orderRepository, preparationQueueService);
     }
 
     @Test
@@ -240,13 +303,13 @@ class OrderServiceTest {
 
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(3L, 1))))
                 .isInstanceOf(MenuItemUnavailableException.class);
-        verifyNoInteractions(paymentGateway, orderRepository, preparationQueueService);
+        verifyNoInteractions(cardPayment, orderRepository, preparationQueueService);
     }
 
     @Test
     void declinedPaymentCreatesNoOrder() {
         menu(item(1L, "Margherita Pizza", "14.00", "available"));
-        when(paymentGateway.charge(any(), any())).thenReturn(PaymentResult.declined("Insufficient funds"));
+        when(cardPayment.pay(any(), any())).thenReturn(PaymentResult.declined("Insufficient funds"));
 
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID, request(new OrderItemRequestDto(1L, 1))))
                 .isInstanceOf(PaymentDeclinedException.class);
@@ -312,7 +375,7 @@ class OrderServiceTest {
         when(menuItemOptionRepository.findByMenuItemIdIn(List.of(1L))).thenReturn(List.of(
                 new MenuItemOption(7L, 1L, new BigDecimal("2.00"), "Extra cheese"),
                 new MenuItemOption(8L, 1L, new BigDecimal("1.50"), "Extra basil")));
-        when(paymentGateway.charge(CUSTOMER_ID, new BigDecimal("35.00"))).thenReturn(PaymentResult.approved("MOCK-1"));
+        when(cardPayment.pay(CUSTOMER_ID, new BigDecimal("35.00"))).thenReturn(PaymentResult.approved("MOCK-1"));
         when(orderRepository.save(any(Order.class))).thenAnswer(inv -> inv.getArgument(0));
 
         OrderResponseDto response = service.placeOrder(CUSTOMER_ID,
@@ -338,6 +401,6 @@ class OrderServiceTest {
         assertThatThrownBy(() -> service.placeOrder(CUSTOMER_ID,
                 request(new OrderItemRequestDto(4L, 1, List.of(7L)))))
                 .isInstanceOf(InvalidOrderException.class);
-        verifyNoInteractions(paymentGateway, orderRepository, jdbc);
+        verifyNoInteractions(cardPayment, orderRepository, jdbc);
     }
 }

@@ -145,9 +145,9 @@ public class PayPalCheckoutService {
             }
             if (checkout.captureId.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "PayPal capture reference is missing");
             List<OrderResponseDto> receipts = java.util.stream.IntStream.range(0, checkout.requests.size())
-                    .mapToObj(index -> orders.placePaidOrder(customerId, checkout.requests.get(index),
-                            "PAYPAL-" + checkout.captureId, checkout.totals.get(index)
-                                    .subtract(BigDecimal.valueOf(checkout.requests.get(index).tenderAmount(), 1)))).toList();
+                    .mapToObj(index -> orders.placeOrder(customerId, checkout.requests.get(index),
+                            new PayPalPayment(checkout.captureId, checkout.totals.get(index)
+                                    .subtract(BigDecimal.valueOf(checkout.requests.get(index).tenderAmount(), 1))))).toList();
             checkout.receipts = receipts;
             return receipts;
         }
